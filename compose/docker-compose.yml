@@ -1,0 +1,114 @@
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: srv-traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - "--log.level=INFO"
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=net-app"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - net-frontend
+      - net-app
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=net-app"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN_NAME}`) && (PathPrefix(`/dashboard`) || PathPrefix(`/api`))"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.entrypoints=web"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: srv-postgres
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - net-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_ROOT_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ROOT_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init-databases.sql:/docker-entrypoint-initdb.d/01-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_ROOT_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: srv-n8n
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - net-app
+      - net-db
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=srv-postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_N8N_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_N8N_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_N8N_PASSWORD}
+      - N8N_HOST=n8n.${DOMAIN_NAME}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://n8n.${DOMAIN_NAME}/
+    volumes:
+      - n8ndata:/home/node/.n8n
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=net-app"
+      - "traefik.http.routers.n8n.rule=Host(`n8n.${DOMAIN_NAME}`)"
+      - "traefik.http.routers.n8n.entrypoints=web"
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+networks:
+  net-frontend:
+    name: net-frontend
+    driver: bridge
+  net-app:
+    name: net-app
+    driver: bridge
+  net-db:
+    name: net-db
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+    name: srv-pgdata
+  n8ndata:
+    name: srv-n8ndata
